@@ -50,9 +50,9 @@ class APIError(MovieError):
 try:
     import seed
     # Test if the module loaded correctly
-    print("✅ seed.py imported successfully!")
+    print("[OK] seed.py imported successfully!")
 except ImportError as e:
-    print(f"❌ Error importing seed: {e}")
+    print(f"[ERROR] Error importing seed: {e}")
     # Create a dummy module to prevent crashes
     class DummySeed:
         def get_sample_movies(self): 
@@ -81,18 +81,11 @@ def setup_logging():
 
 def get_config():
     """Get configuration from environment or secrets with fallback"""
-    app_dir = os.path.dirname(os.path.abspath(__file__))
-
-    def resolve_database_path(db_value):
-        if not db_value:
-            return os.path.join(app_dir, "movies.db")
-        return db_value if os.path.isabs(db_value) else os.path.join(app_dir, db_value)
-
     try:
         # Try to get from secrets, with fallback values
         omdb_api_key = st.secrets.get("OMDB_API_KEY", "9771bb71")
         gemini_api_key = st.secrets.get("GEMINI_API_KEY", "")  # 🔑 NEW
-        database_url = resolve_database_path(st.secrets.get("DATABASE_URL", "movies.db"))
+        database_url = st.secrets.get("DATABASE_URL", "movies.db")
         debug_mode = st.secrets.get("DEBUG", "false").lower() == 'true'
         cache_timeout = int(st.secrets.get("CACHE_TIMEOUT", "300"))
         max_retries = int(st.secrets.get("MAX_RETRIES", "3"))
@@ -111,7 +104,7 @@ def get_config():
         return {
             'omdb_api_key': "9771bb71",  # Default API key
             'gemini_api_key': "",        # 🔑 NEW
-            'database_url': resolve_database_path("movies.db"),
+            'database_url': "movies.db",
             'debug_mode': False,
             'cache_timeout': 300,
             'max_retries': 3
@@ -1346,11 +1339,6 @@ def save_recommendation_feedback(movie, vote_type, source_query=""):
     """Persist like or dislike feedback for a recommendation."""
     title = (movie.get("title") or movie.get("Title") or "").strip()
     if not title or vote_type not in {"like", "dislike"}:
-        logging.warning(
-            "Skipping recommendation feedback save due to invalid payload: title=%r vote_type=%r",
-            title,
-            vote_type,
-        )
         return None
 
     genre = movie.get("genre") or movie.get("Genre") or "Unknown"
@@ -1552,10 +1540,8 @@ def build_smart_fallback_message(query, recommendations, fallback_reason, filter
     return no_match_message
 
 
-def run_ai_finder_chat_turn(chat, user_msg, feedback_profile, recommendation_filters=None):
-    """Process a chat prompt and persist the full exchange into session history."""
-    st.session_state.ai_history.append({"role": "user", "content": user_msg})
-
+def build_ai_finder_assistant_message(chat, user_msg, feedback_profile, recommendation_filters=None):
+    """Generate the assistant payload for one AI Finder prompt."""
     feedback_context = build_feedback_prompt_context(feedback_profile)
     filter_context = build_ai_filter_prompt_context(recommendation_filters or {})
     answer_text, movie_titles = chat.generate_ai_response(
@@ -1600,7 +1586,120 @@ def run_ai_finder_chat_turn(chat, user_msg, feedback_profile, recommendation_fil
         "used_fallback": use_fallback,
         "filters": recommendation_filters or {},
     }
+    return assistant_message, updated_feedback_profile
+
+
+def sync_ai_finder_chat_history(chat):
+    """Keep the lightweight Gemini history aligned with the visible chat."""
+    if not chat:
+        return
+
+    chat.history = [
+        (message.get("role", ""), message.get("content", ""))
+        for message in st.session_state.get("ai_history", [])
+        if message.get("role") in {"user", "assistant"}
+    ]
+
+
+def get_ai_finder_history_turns():
+    """Convert flat AI Finder history into user/assistant turns."""
+    turns = []
+    history = st.session_state.get("ai_history", [])
+    index = 0
+
+    while index < len(history):
+        message = history[index]
+        if message.get("role") != "user":
+            index += 1
+            continue
+
+        assistant_message = None
+        assistant_index = None
+        if index + 1 < len(history) and history[index + 1].get("role") == "assistant":
+            assistant_index = index + 1
+            assistant_message = history[assistant_index]
+
+        turns.append(
+            {
+                "user_index": index,
+                "assistant_index": assistant_index,
+                "user_message": message,
+                "assistant_message": assistant_message,
+            }
+        )
+        index = assistant_index + 1 if assistant_index is not None else index + 1
+
+    return turns
+
+
+def clear_ai_finder_edit_state():
+    """Reset temporary UI state for AI Finder prompt editing."""
+    st.session_state.ai_edit_turn_index = None
+    st.session_state.ai_edit_prompt = ""
+
+
+def delete_ai_finder_history_turn(chat, user_index):
+    """Delete a prompt and its paired assistant response from AI Finder history."""
+    history = list(st.session_state.get("ai_history", []))
+    if user_index < 0 or user_index >= len(history):
+        return False
+    if history[user_index].get("role") != "user":
+        return False
+
+    delete_count = 1
+    if user_index + 1 < len(history) and history[user_index + 1].get("role") == "assistant":
+        delete_count = 2
+
+    del history[user_index:user_index + delete_count]
+    st.session_state.ai_history = history
+    clear_ai_finder_edit_state()
+    sync_ai_finder_chat_history(chat)
+    return True
+
+
+def update_ai_finder_history_turn(chat, user_index, user_msg, feedback_profile, recommendation_filters=None):
+    """Edit a saved prompt and regenerate its paired assistant message."""
+    history = list(st.session_state.get("ai_history", []))
+    if user_index < 0 or user_index >= len(history):
+        return None, feedback_profile
+    if history[user_index].get("role") != "user":
+        return None, feedback_profile
+
+    clean_prompt = user_msg.strip()
+    if not clean_prompt:
+        return None, feedback_profile
+
+    assistant_message, updated_feedback_profile = build_ai_finder_assistant_message(
+        chat,
+        clean_prompt,
+        feedback_profile,
+        recommendation_filters=recommendation_filters,
+    )
+
+    history[user_index] = {"role": "user", "content": clean_prompt}
+    if user_index + 1 < len(history) and history[user_index + 1].get("role") == "assistant":
+        history[user_index + 1] = assistant_message
+    else:
+        history.insert(user_index + 1, assistant_message)
+
+    st.session_state.ai_history = history
+    clear_ai_finder_edit_state()
+    sync_ai_finder_chat_history(chat)
+    return assistant_message, updated_feedback_profile
+
+
+def run_ai_finder_chat_turn(chat, user_msg, feedback_profile, recommendation_filters=None):
+    """Process a chat prompt and persist the full exchange into session history."""
+    clear_ai_finder_edit_state()
+    st.session_state.ai_history.append({"role": "user", "content": user_msg})
+    assistant_message, updated_feedback_profile = build_ai_finder_assistant_message(
+        chat,
+        user_msg,
+        feedback_profile,
+        recommendation_filters=recommendation_filters,
+    )
     st.session_state.ai_history.append(assistant_message)
+    sync_ai_finder_chat_history(chat)
 
     return assistant_message, updated_feedback_profile
 
@@ -1647,15 +1746,8 @@ def render_explainable_recommendations(
                 use_container_width=True,
                 type="primary" if current_vote == "like" else "secondary",
             ):
-                saved_feedback_id = save_recommendation_feedback(movie, "like", feedback_query)
-                if saved_feedback_id:
-                    st.session_state.feedback_flash = f"Saved a like for {movie['title']}."
-                    st.session_state.feedback_flash_level = "success"
-                else:
-                    st.session_state.feedback_flash = (
-                        f"Could not save your like for {movie['title']}. Please try again."
-                    )
-                    st.session_state.feedback_flash_level = "error"
+                save_recommendation_feedback(movie, "like", feedback_query)
+                st.session_state.feedback_flash = f"Saved a like for {movie['title']}."
                 st.rerun()
 
         with control_columns[1]:
@@ -1665,15 +1757,8 @@ def render_explainable_recommendations(
                 use_container_width=True,
                 type="primary" if current_vote == "dislike" else "secondary",
             ):
-                saved_feedback_id = save_recommendation_feedback(movie, "dislike", feedback_query)
-                if saved_feedback_id:
-                    st.session_state.feedback_flash = f"Saved a dislike for {movie['title']}."
-                    st.session_state.feedback_flash_level = "success"
-                else:
-                    st.session_state.feedback_flash = (
-                        f"Could not save your dislike for {movie['title']}. Please try again."
-                    )
-                    st.session_state.feedback_flash_level = "error"
+                save_recommendation_feedback(movie, "dislike", feedback_query)
+                st.session_state.feedback_flash = f"Saved a dislike for {movie['title']}."
                 st.rerun()
 
         if show_add_button:
@@ -1693,6 +1778,197 @@ def render_explainable_recommendations(
 
                     add_movie(movie["title"], movie.get("genre", "Unknown"), year_value, False)
                     st.success(f"Added {movie['title']}!")
+
+        # Comment section below every recommended movie
+        render_movie_comments_section(
+            movie_title=movie.get("title", f"movie_{index}"),
+            key_prefix=f"{key_prefix}_cmt_{index}",
+        )
+
+# ------------------------------
+# Movie Comments - CRUD Helpers
+# ------------------------------
+def get_movie_comments(movie_title):
+    """Return all comments for a movie, newest first."""
+    try:
+        with sqlite3.connect(CONFIG['database_url']) as conn:
+            c = conn.cursor()
+            c.execute(
+                "SELECT id, comment_text, created_at, updated_at FROM movie_comments "
+                "WHERE movie_title = ? ORDER BY created_at DESC",
+                (movie_title,)
+            )
+            rows = c.fetchall()
+            return [
+                {"id": r[0], "text": r[1], "created_at": r[2], "updated_at": r[3]}
+                for r in rows
+            ]
+    except sqlite3.Error as e:
+        logging.error(f"get_movie_comments error: {e}")
+        return []
+
+
+def add_movie_comment(movie_title, comment_text):
+    """Insert a new comment. Returns True on success."""
+    if not comment_text.strip():
+        return False
+    try:
+        with sqlite3.connect(CONFIG['database_url']) as conn:
+            c = conn.cursor()
+            c.execute(
+                "INSERT INTO movie_comments (movie_title, comment_text) VALUES (?, ?)",
+                (movie_title, comment_text.strip())
+            )
+            conn.commit()
+            return True
+    except sqlite3.Error as e:
+        logging.error(f"add_movie_comment error: {e}")
+        return False
+
+
+def update_movie_comment(comment_id, new_text):
+    """Update an existing comment. Returns True on success."""
+    if not new_text.strip():
+        return False
+    try:
+        with sqlite3.connect(CONFIG['database_url']) as conn:
+            c = conn.cursor()
+            c.execute(
+                "UPDATE movie_comments SET comment_text = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?",
+                (new_text.strip(), comment_id)
+            )
+            conn.commit()
+            return c.rowcount > 0
+    except sqlite3.Error as e:
+        logging.error(f"update_movie_comment error: {e}")
+        return False
+
+
+def delete_movie_comment(comment_id):
+    """Delete a comment by id. Returns True on success."""
+    try:
+        with sqlite3.connect(CONFIG['database_url']) as conn:
+            c = conn.cursor()
+            c.execute("DELETE FROM movie_comments WHERE id = ?", (comment_id,))
+            conn.commit()
+            return c.rowcount > 0
+    except sqlite3.Error as e:
+        logging.error(f"delete_movie_comment error: {e}")
+        return False
+
+
+def render_movie_comments_section(movie_title, key_prefix):
+    """
+    Render a collapsible comment box below a movie card in AI Finder.
+    - Shows existing comments with Edit / Delete buttons.
+    - Provides a textarea + Add Comment button at the bottom.
+    """
+    safe_key = re.sub(r'[^a-zA-Z0-9]', '_', movie_title)[:40]
+    widget_key = f"{key_prefix}_{safe_key}"
+
+    with st.expander(f"Comments for **{movie_title}**", expanded=False):
+        comments = get_movie_comments(movie_title)
+
+        # flash messages
+        flash_key = f"cmnt_flash_{widget_key}"
+        flash_message = st.session_state.pop(flash_key, None)
+        if flash_message:
+            if isinstance(flash_message, tuple):
+                flash_kind, flash_text = flash_message
+            else:
+                flash_kind, flash_text = "success", flash_message
+
+            if flash_kind == "warning":
+                st.warning(flash_text)
+            elif flash_kind == "error":
+                st.error(flash_text)
+            else:
+                st.success(flash_text)
+
+        # existing comments
+        if comments:
+            for cmt in comments:
+                cmt_id   = cmt["id"]
+                cmt_text = cmt["text"]
+                ts       = cmt["created_at"][:16] if cmt["created_at"] else ""
+                edited   = " (edited)" if cmt["updated_at"] != cmt["created_at"] else ""
+
+                edit_flag_key = f"cmnt_edit_{widget_key}_{cmt_id}"
+                edit_text_key = f"cmnt_etext_{widget_key}_{cmt_id}"
+
+                # styled comment card — text + timestamp + inline action row
+                st.markdown(
+                    f"""
+                    <div style="background:rgba(255,255,255,0.05);border-left:3px solid #FFD93D;
+                                padding:0.6rem 0.8rem 0.5rem;border-radius:6px;margin-bottom:0.3rem;">
+                        <div style="color:#eee;font-size:0.93rem;margin-bottom:0.35rem;">
+                            {html.escape(cmt_text)}
+                        </div>
+                        <div style="color:#888;font-size:0.70rem;">{ts}{edited}</div>
+                    </div>
+                    """,
+                    unsafe_allow_html=True,
+                )
+
+                # Edit / Delete — perfectly equal, flush side-by-side
+                edit_col, del_col = st.columns([1, 1])
+                with edit_col:
+                    if st.button("✏️ Edit", key=f"btn_edit_{widget_key}_{cmt_id}",
+                                 use_container_width=True):
+                        st.session_state[edit_flag_key] = True
+                        st.session_state[edit_text_key] = cmt_text
+                        st.rerun()
+                with del_col:
+                    if st.button("🗑️ Delete", key=f"btn_del_{widget_key}_{cmt_id}",
+                                 use_container_width=True):
+                        if delete_movie_comment(cmt_id):
+                            st.session_state[flash_key] = "Comment deleted."
+                        st.rerun()
+
+                # Inline edit form
+                if st.session_state.get(edit_flag_key):
+                    new_text = st.text_area(
+                        "Edit comment",
+                        value=st.session_state.get(edit_text_key, cmt_text),
+                        key=f"ta_edit_{widget_key}_{cmt_id}",
+                        height=90,
+                    )
+                    save_col, cancel_col = st.columns([1, 1])
+                    with save_col:
+                        if st.button("💾 Save", key=f"btn_save_{widget_key}_{cmt_id}",
+                                     use_container_width=True, type="primary"):
+                            if update_movie_comment(cmt_id, new_text):
+                                st.session_state[flash_key] = "Comment updated!"
+                                st.session_state.pop(edit_flag_key, None)
+                                st.session_state.pop(edit_text_key, None)
+                            st.rerun()
+                    with cancel_col:
+                        if st.button("Cancel", key=f"btn_cancel_{widget_key}_{cmt_id}",
+                                     use_container_width=True):
+                            st.session_state.pop(edit_flag_key, None)
+                            st.session_state.pop(edit_text_key, None)
+                            st.rerun()
+
+                st.markdown("<div style='margin-bottom:0.6rem;'></div>", unsafe_allow_html=True)
+        else:
+            st.caption("No comments yet. Be the first to comment!")
+
+        # Add new comment
+        st.markdown("---")
+        new_comment = st.text_area(
+            "Write a comment...",
+            placeholder=f"Share your thoughts about {movie_title}...",
+            key=f"ta_new_{widget_key}",
+            height=80,
+        )
+        if st.button("➕ Add Comment", key=f"btn_add_{widget_key}",
+                     use_container_width=True, type="primary"):
+            if add_movie_comment(movie_title, new_comment):
+                st.session_state[flash_key] = "Comment added!"
+            else:
+                st.session_state[flash_key] = ("warning", "Comment cannot be empty")
+            st.rerun()
+
 
 # -----------------------------
 # Enhanced Database Functions
@@ -1778,56 +2054,25 @@ def init_db():
                 'CREATE INDEX IF NOT EXISTS idx_recommendation_feedback_created ON recommendation_feedback(created_at DESC)'
             )
 
-            # Legacy compatibility: older databases may have a strict vote_type
-            # constraint that allows only `like`. Rebuild the table in place so
-            # dislike votes can be persisted.
+            # Movie Comments table (AI Finder)
             c.execute(
-                "SELECT sql FROM sqlite_master WHERE type='table' AND name='recommendation_feedback'"
+                '''
+                CREATE TABLE IF NOT EXISTS movie_comments (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    movie_title TEXT NOT NULL,
+                    comment_text TEXT NOT NULL,
+                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+                )
+                '''
             )
-            feedback_table_row = c.fetchone()
-            feedback_table_sql = (feedback_table_row[0] or "").lower() if feedback_table_row else ""
-            if feedback_table_sql and "dislike" not in feedback_table_sql:
-                c.execute(
-                    '''
-                    CREATE TABLE recommendation_feedback_new (
-                        id INTEGER PRIMARY KEY AUTOINCREMENT,
-                        movie_title TEXT NOT NULL,
-                        movie_genre TEXT,
-                        movie_year TEXT,
-                        vote_type TEXT NOT NULL CHECK (vote_type IN ('like', 'dislike')),
-                        source_query TEXT,
-                        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-                    )
-                    '''
-                )
-                c.execute(
-                    '''
-                    INSERT INTO recommendation_feedback_new
-                    (id, movie_title, movie_genre, movie_year, vote_type, source_query, created_at)
-                    SELECT
-                        id,
-                        movie_title,
-                        movie_genre,
-                        movie_year,
-                        CASE
-                            WHEN lower(trim(vote_type)) = 'dislike' THEN 'dislike'
-                            ELSE 'like'
-                        END,
-                        source_query,
-                        created_at
-                    FROM recommendation_feedback
-                    '''
-                )
-                c.execute("DROP TABLE recommendation_feedback")
-                c.execute("ALTER TABLE recommendation_feedback_new RENAME TO recommendation_feedback")
-                c.execute(
-                    'CREATE INDEX IF NOT EXISTS idx_recommendation_feedback_title ON recommendation_feedback(movie_title)'
-                )
-                c.execute(
-                    'CREATE INDEX IF NOT EXISTS idx_recommendation_feedback_created ON recommendation_feedback(created_at DESC)'
-                )
-                logging.info("Migrated recommendation_feedback table to support dislike votes.")
-            
+            c.execute(
+                'CREATE INDEX IF NOT EXISTS idx_movie_comments_title ON movie_comments(movie_title)'
+            )
+            c.execute(
+                'CREATE INDEX IF NOT EXISTS idx_movie_comments_created ON movie_comments(created_at DESC)'
+            )
+
             # Check if database needs initial setup marker
             c.execute("SELECT name FROM sqlite_master WHERE type='table' AND name='app_metadata'")
             if not c.fetchone():
@@ -2368,12 +2613,7 @@ def show_enhanced_ai_finder_page():
     </div>
     """, unsafe_allow_html=True)
     if st.session_state.get("feedback_flash"):
-        feedback_message = st.session_state.pop("feedback_flash")
-        feedback_level = st.session_state.pop("feedback_flash_level", "success")
-        if feedback_level == "error":
-            st.error(feedback_message)
-        else:
-            st.success(feedback_message)
+        st.success(st.session_state.pop("feedback_flash"))
     if feedback_summary_text:
         st.caption(feedback_summary_text)
 
@@ -2481,7 +2721,20 @@ def show_enhanced_ai_finder_page():
             st.session_state.gemini_chat = GeminiMovieChat()
         if "ai_history" not in st.session_state:
             st.session_state.ai_history = []
+        if "ai_edit_turn_index" not in st.session_state:
+            st.session_state.ai_edit_turn_index = None
+        if "ai_edit_prompt" not in st.session_state:
+            st.session_state.ai_edit_prompt = ""
         chat = st.session_state.gemini_chat
+        sync_ai_finder_chat_history(chat)
+
+        if st.session_state.get("ai_chat_flash"):
+            flash_message = st.session_state.pop("ai_chat_flash")
+            flash_level = st.session_state.pop("ai_chat_flash_level", "success")
+            if flash_level == "error":
+                st.error(flash_message)
+            else:
+                st.success(flash_message)
 
         st.markdown("#### Quick Actions")
         st.caption("Send a ready-made prompt. Similar and Anime use the left search text when available.")
@@ -2499,16 +2752,70 @@ def show_enhanced_ai_finder_page():
                 quick_action_prompt = build_quick_action_prompt("anime", search_query)
 
         # Show chat history
-        for history_index, msg in enumerate(st.session_state.ai_history):
-            with st.chat_message(msg["role"]):
-                st.markdown(msg["content"])
-                if msg["role"] == "assistant" and msg.get("recommendations"):
-                    render_explainable_recommendations(
-                        msg["recommendations"],
-                        key_prefix=f"chat_history_{history_index}",
-                        feedback_states=feedback_states,
-                        feedback_query=msg.get("source_query", ""),
+        for turn in get_ai_finder_history_turns():
+            user_index = turn["user_index"]
+            user_message = turn["user_message"]
+            assistant_message = turn["assistant_message"]
+
+            with st.chat_message("user"):
+                st.markdown(user_message["content"])
+                action_cols = st.columns([1, 1, 2])
+                with action_cols[0]:
+                    if st.button("Edit", key=f"edit_ai_turn_{user_index}", use_container_width=True):
+                        st.session_state.ai_edit_turn_index = user_index
+                        st.session_state.ai_edit_prompt = user_message["content"]
+                        st.rerun()
+                with action_cols[1]:
+                    if st.button("Delete", key=f"delete_ai_turn_{user_index}", use_container_width=True):
+                        if delete_ai_finder_history_turn(chat, user_index):
+                            st.session_state.ai_chat_flash = "Deleted that prompt and reply."
+                            st.session_state.ai_chat_flash_level = "success"
+                        else:
+                            st.session_state.ai_chat_flash = "Could not delete that chat turn. Please try again."
+                            st.session_state.ai_chat_flash_level = "error"
+                        st.rerun()
+
+                if st.session_state.ai_edit_turn_index == user_index:
+                    edited_prompt = st.text_area(
+                        "Edit your prompt",
+                        value=st.session_state.ai_edit_prompt or user_message["content"],
+                        key=f"edit_ai_prompt_{user_index}",
+                        height=120,
                     )
+                    save_cols = st.columns(2)
+                    with save_cols[0]:
+                        if st.button("Save Changes", key=f"save_ai_turn_{user_index}", use_container_width=True, type="primary"):
+                            turn_filters = (assistant_message or {}).get("filters") or recommendation_filters
+                            updated_message, feedback_profile = update_ai_finder_history_turn(
+                                chat,
+                                user_index,
+                                edited_prompt,
+                                feedback_profile,
+                                recommendation_filters=turn_filters,
+                            )
+                            if updated_message:
+                                feedback_states = get_recommendation_feedback_context()[1]
+                                st.session_state.ai_chat_flash = "Updated the prompt and regenerated the reply."
+                                st.session_state.ai_chat_flash_level = "success"
+                            else:
+                                st.session_state.ai_chat_flash = "Prompt cannot be empty."
+                                st.session_state.ai_chat_flash_level = "error"
+                            st.rerun()
+                    with save_cols[1]:
+                        if st.button("Cancel", key=f"cancel_ai_turn_{user_index}", use_container_width=True):
+                            clear_ai_finder_edit_state()
+                            st.rerun()
+
+            if assistant_message:
+                with st.chat_message("assistant"):
+                    st.markdown(assistant_message["content"])
+                    if assistant_message.get("recommendations"):
+                        render_explainable_recommendations(
+                            assistant_message["recommendations"],
+                            key_prefix=f"chat_history_{user_index}",
+                            feedback_states=feedback_states,
+                            feedback_query=assistant_message.get("source_query", ""),
+                        )
 
         # User input (works like before)
         user_msg = st.chat_input(

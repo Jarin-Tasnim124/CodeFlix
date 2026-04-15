@@ -11,16 +11,18 @@ Implemented feature areas:
 3. Prompt templates (quick actions)
 4. Smart fallback recommender
 5. Recommendation filters
+6. Chat history edit & delete
+7. Movie comment box (Add / Edit / Delete)
 
 Core AI Finder entry point:
 
-- `app.py:2264` - `show_enhanced_ai_finder_page()`
+- `app.py` - `show_enhanced_ai_finder_page()`
 
 Recommendation engine helpers:
 
-- `app.py:1099` - `build_explainable_recommendations(...)`
-- `recommender.py:295` - `build_recommendation_reason(...)`
-- `recommender.py:352` - `add_recommendation_reasons(...)`
+- `app.py` - `build_explainable_recommendations(...)`
+- `recommender.py` - `build_recommendation_reason(...)`
+- `recommender.py` - `add_recommendation_reasons(...)`
 
 ## 1. Explainable Recommendations
 
@@ -31,11 +33,11 @@ Recommendation engine helpers:
 
 ### Main code references
 
-- `app.py:1099` - `build_explainable_recommendations(...)`
-- `app.py:1580` - `render_explainable_recommendations(...)`
-- `recommender.py:247` - `_extract_query_signals(...)`
-- `recommender.py:295` - `build_recommendation_reason(...)`
-- `recommender.py:352` - `add_recommendation_reasons(...)`
+- `app.py` - `build_explainable_recommendations(...)`
+- `app.py` - `render_explainable_recommendations(...)`
+- `recommender.py` - `_extract_query_signals(...)`
+- `recommender.py` - `build_recommendation_reason(...)`
+- `recommender.py` - `add_recommendation_reasons(...)`
 
 ### Behavior
 
@@ -60,14 +62,14 @@ Recommendation engine helpers:
 
 ### Main code references
 
-- `app.py:1721` - creates `recommendation_feedback` table
-- `app.py:1287` - reads recent feedback rows
-- `app.py:1308` - builds feedback context and latest vote map
-- `app.py:1322` - saves feedback for a recommendation
-- `app.py:1368` - builds personalization summary text for the UI
-- `app.py:1580` - renders recommendation cards with feedback buttons
-- `recommender.py:116` - `build_feedback_profile(...)`
-- `recommender.py:186` - `rank_recommendations_with_feedback(...)`
+- `app.py` - creates `recommendation_feedback` table in `init_db()`
+- `app.py` - reads recent feedback rows
+- `app.py` - builds feedback context and latest vote map
+- `app.py` - saves feedback for a recommendation (`save_recommendation_feedback`)
+- `app.py` - builds personalization summary text for the UI
+- `app.py` - renders recommendation cards with feedback buttons (`render_explainable_recommendations`)
+- `recommender.py` - `build_feedback_profile(...)`
+- `recommender.py` - `rank_recommendations_with_feedback(...)`
 
 ### Behavior
 
@@ -87,9 +89,9 @@ Recommendation engine helpers:
 
 ### Main code references
 
-- `app.py:1436` - `build_quick_action_prompt(...)`
-- `app.py:1527` - `run_ai_finder_chat_turn(...)`
-- `app.py:2368` - quick action UI block inside `show_enhanced_ai_finder_page()`
+- `app.py` - `build_quick_action_prompt(...)`
+- `app.py` - `run_ai_finder_chat_turn(...)`
+- `app.py` - quick action UI block inside `show_enhanced_ai_finder_page()`
 
 ### Behavior
 
@@ -107,11 +109,11 @@ Recommendation engine helpers:
 
 ### Main code references
 
-- `app.py:1451` - `should_use_smart_fallback(...)`
-- `app.py:1474` - `build_smart_fallback_recommendations(...)`
-- `app.py:1500` - `build_smart_fallback_message(...)`
-- `app.py:1527` - fallback is triggered in `run_ai_finder_chat_turn(...)`
-- `recommender.py:366` - `tfidf_recommend(...)`
+- `app.py` - `should_use_smart_fallback(...)`
+- `app.py` - `build_smart_fallback_recommendations(...)`
+- `app.py` - `build_smart_fallback_message(...)`
+- `app.py` - fallback is triggered in `run_ai_finder_chat_turn(...)`
+- `recommender.py` - `tfidf_recommend(...)`
 
 ### Behavior
 
@@ -134,15 +136,14 @@ Recommendation engine helpers:
 
 ### Main code references
 
-- `app.py:1167` - `get_ai_finder_filter_defaults()`
-- `app.py:1184` - `build_ai_filter_summary(...)`
-- `app.py:1204` - `build_ai_filter_prompt_context(...)`
-- `app.py:1226` - `recommendation_matches_basic_filters(...)`
-- `app.py:1261` - `filter_recommendations_for_ai_finder(...)`
-- `app.py:1385` - filtered feedback-aware ranking
-- `app.py:1474` - filtered fallback TF-IDF ranking
-- `app.py:2268` - filter UI setup inside `show_enhanced_ai_finder_page()`
-- `app.py:2687` - filtered no-results recommendation fallback
+- `app.py` - `get_ai_finder_filter_defaults()`
+- `app.py` - `build_ai_filter_summary(...)`
+- `app.py` - `build_ai_filter_prompt_context(...)`
+- `app.py` - `recommendation_matches_basic_filters(...)`
+- `app.py` - `filter_recommendations_for_ai_finder(...)`
+- `app.py` - filtered feedback-aware ranking
+- `app.py` - filtered fallback TF-IDF ranking
+- `app.py` - filter UI setup inside `show_enhanced_ai_finder_page()`
 
 ### Behavior
 
@@ -159,6 +160,77 @@ Recommendation engine helpers:
 - The IMDb filter works best when OMDb data is reachable
 - In restricted/offline conditions, a strict IMDb threshold may reduce or eliminate matches instead of guessing unsupported ratings
 
+## 6. Chat History Edit & Delete
+
+### What it does
+
+- Allows users to **edit** a previously sent prompt in the AI Finder chat
+- Regenerates the AI response when the edited prompt is saved
+- Allows users to **delete** any chat turn (prompt + response pair) from history
+
+### Main code references
+
+- `app.py` - `sync_ai_finder_chat_history(chat)` — syncs in-memory history with session state
+- `app.py` - `get_ai_finder_history_turns()` — returns all chat turns for rendering
+- `app.py` - `clear_ai_finder_edit_state()` — clears the active edit selection
+- `app.py` - `delete_ai_finder_history_turn(chat, user_index)` — removes a turn from history
+- `app.py` - `update_ai_finder_history_turn(...)` — re-runs Gemini with the edited prompt and stores the result
+- `app.py` - Edit/Delete UI block inside the chat history loop in `show_enhanced_ai_finder_page()`
+
+### Behavior
+
+- Each chat bubble in the history shows **Edit** and **Delete** buttons below the user message
+- Clicking **Edit** opens an inline text area pre-filled with the original prompt
+- **Save Changes** re-calls Gemini and replaces the old assistant response in history
+- **Cancel** closes the edit form without changes
+- Clicking **Delete** removes the entire turn (user message + assistant response) and shows a flash confirmation
+- Flash messages are scoped per-turn to avoid cross-turn interference
+
+## 7. Movie Comment Box
+
+### What it does
+
+- Adds a collapsible **comment section** below each recommended movie card in AI Finder chat results
+- Supports full **Add / Edit / Delete** operations on comments
+- Comments are stored persistently in SQLite and scoped per movie title
+
+### Main code references
+
+- `app.py` - `movie_comments` table created in `init_db()`
+- `app.py` - `get_movie_comments(movie_title)` — fetches all comments for a movie, newest first
+- `app.py` - `add_movie_comment(movie_title, comment_text)` — inserts a new comment
+- `app.py` - `update_movie_comment(comment_id, new_text)` — updates comment text and `updated_at` timestamp
+- `app.py` - `delete_movie_comment(comment_id)` — removes a comment by ID
+- `app.py` - `render_movie_comments_section(movie_title, key_prefix)` — renders the full comment UI
+- `app.py` - called from `render_explainable_recommendations(...)` after the 👍/👎 buttons for every movie
+
+### Database schema
+
+```sql
+CREATE TABLE movie_comments (
+    id           INTEGER PRIMARY KEY AUTOINCREMENT,
+    movie_title  TEXT NOT NULL,
+    comment_text TEXT NOT NULL,
+    created_at   TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    updated_at   TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+);
+```
+
+### Behavior
+
+- The comment section is hidden by default inside a **collapsible expander** to keep the UI clean
+- When expanded, existing comments are shown as styled cards with a yellow left border
+- Each comment card displays:
+  - The comment text
+  - The timestamp (`created_at`)
+  - An `(edited)` label if the comment has been modified
+  - **✏️ Edit** and **🗑️ Delete** buttons — equal-width, flush side-by-side (no empty gaps)
+- Clicking **✏️ Edit** opens an inline text area below the card with **💾 Save** and **Cancel** buttons
+- Clicking **🗑️ Delete** immediately removes the comment and shows a flash confirmation
+- The **➕ Add Comment** input area is always visible at the bottom of the expander
+- Flash messages (added / updated / deleted) are scoped per movie to avoid cross-card interference
+- Comments are shared across all chat sessions since they are stored in the database (not session state)
+
 ## End-to-End Flow
 
 1. User enters a prompt or clicks a quick action in AI Finder
@@ -166,12 +238,15 @@ Recommendation engine helpers:
 3. Gemini returns explanation text and candidate titles
 4. If Gemini fails, the app switches to TF-IDF fallback
 5. Candidate recommendations are filtered, enriched with `Why this movie?` reasons, and reranked with saved feedback
-6. Cards are rendered with explanations, feedback buttons, and optional metadata
+6. Cards are rendered with explanations, feedback buttons (👍/👎), and optional metadata
+7. Below each card, a **Comments** expander allows the user to add, edit, or delete personal notes about that movie
+8. The user can edit or delete any past chat turn from the history without leaving the page
 
 ## Primary Files
 
-- `app.py` - UI, chat flow, feedback persistence, fallback logic, filter logic
-- `recommender.py` - recommendation reasoning, TF-IDF search, personalization reranking
-- `movies.db` - stores feedback in `recommendation_feedback`
-
+- `app.py` — UI, chat flow, feedback persistence, fallback logic, filter logic, chat edit/delete, comment box CRUD
+- `recommender.py` — recommendation reasoning, TF-IDF search, personalization reranking
+- `movies.db` — stores data in:
+  - `recommendation_feedback` — like/dislike votes per movie
+  - `movie_comments` — user comments per movie (Add / Edit / Delete)
 
